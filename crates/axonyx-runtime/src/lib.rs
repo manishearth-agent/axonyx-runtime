@@ -2854,6 +2854,21 @@ fn eval_preview_value_with_functions(
 ) -> Result<AxValue, PreviewError> {
     match value {
         AxValuePlan::Expr(expr) => eval_preview_expr_with_functions(expr, scope, env, functions),
+        AxValuePlan::Call { path, args } if path == &["Native", "call"] => {
+            let name = axonyx_core::ax_native::native_call_name(args).ok_or_else(|| {
+                PreviewError::Runtime { message: "Native.call requires a literal registered function name and one payload in a backend data binding".to_string() }
+            })?;
+            let runtime = runtime.ok_or_else(|| PreviewError::Runtime {
+                message: "native functions are unavailable for this backend runtime".to_string(),
+            })?;
+            let input = eval_preview_expr_with_functions(&args[1], scope, env, functions)?;
+            runtime
+                .runtime_native_call(&name, preview_value_to_json(&input))
+                .map(preview_json_to_value)
+                .map_err(|error| PreviewError::Runtime {
+                    message: error.to_string(),
+                })
+        }
         AxValuePlan::Call { path, args } if path == &["Password", "verifyOptional"] => {
             let invalid = || {
                 PreviewError::Runtime { message: "Password.verifyOptional requires (String password, optionalRecord?.stringField)".to_string() }

@@ -1084,6 +1084,14 @@ impl AxHttpRequest {
             .or_else(|| parse_urlencoded_fields(&self.body_text_lossy()).remove(name))
     }
 
+    /// Decodes query keys and values with the same rules as form fields.
+    pub fn query_fields(&self) -> BTreeMap<String, String> {
+        self.target
+            .split_once('?')
+            .map(|(_, query)| parse_urlencoded_fields(query))
+            .unwrap_or_default()
+    }
+
     pub fn incoming_file(&self, name: &str) -> Option<&AxIncomingFile> {
         self.multipart.as_ref().and_then(|form| form.file(name))
     }

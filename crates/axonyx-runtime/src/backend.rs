@@ -1094,6 +1094,13 @@ fn load_dotenv_file(path: impl AsRef<Path>) {
 pub trait AxRuntimeEnvAccess {
     fn env(&self) -> &AxEnv;
 
+    /// Optional server capability; never exposes arbitrary Rust symbols.
+    fn runtime_native_call(&self, _name: &str, _input: Value) -> AxRuntimeResult<Value> {
+        Err(AxRuntimeError::message(
+            "native functions are unavailable for this backend runtime",
+        ))
+    }
+
     fn runtime_create_session(
         &self,
         _subject: &str,
@@ -1343,6 +1350,7 @@ pub struct AxDatabaseRuntime<A> {
     adapter: A,
     metrics: AxDatabaseMetrics,
     session: OnceLock<AxConfiguredSession>,
+    native: Option<Arc<crate::native::AxNativeRegistry>>,
 }
 
 impl<A> AxDatabaseRuntime<A> {
@@ -1352,7 +1360,14 @@ impl<A> AxDatabaseRuntime<A> {
             adapter,
             metrics: AxDatabaseMetrics::default(),
             session: OnceLock::new(),
+            native: None,
         }
+    }
+
+    /// Register trusted callbacks before sharing the runtime with requests.
+    pub fn with_native_functions(mut self, registry: crate::native::AxNativeRegistry) -> Self {
+        self.native = Some(Arc::new(registry));
+        self
     }
 
     fn configured_session(&self) -> AxRuntimeResult<&AxConfiguredSession> {
@@ -1369,6 +1384,15 @@ impl<A> AxDatabaseRuntime<A> {
 impl<A> AxRuntimeEnvAccess for AxDatabaseRuntime<A> {
     fn env(&self) -> &AxEnv {
         &self.env
+    }
+
+    fn runtime_native_call(&self, name: &str, input: Value) -> AxRuntimeResult<Value> {
+        let registry = self.native.as_ref().ok_or_else(|| {
+            AxRuntimeError::message("native functions are unavailable for this backend runtime")
+        })?;
+        registry
+            .call(name, input)
+            .map_err(|error| AxRuntimeError::message(error.to_string()))
     }
 
     fn runtime_create_session(

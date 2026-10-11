@@ -31,8 +31,8 @@ axonyx-runtime = { git = "https://github.com/vladanPro/axonyx-runtime" }
 ## Local Development
 
 The unreleased [Native Functions V0 foundation](docs/native-functions-v0.md)
-provides explicit typed Rust callbacks. DSL and generated-backend wiring are
-not implemented yet.
+provides explicit typed Rust callbacks and a server-side `Native.call` data
+binding. Automatic CLI/application package registration is not implemented yet.
 
 ### Login Protection Primitives (Since 0.5.0)
 

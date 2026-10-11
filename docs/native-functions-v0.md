@@ -1,7 +1,8 @@
 # Native Functions V0
 
 This unreleased foundation registers server-side Rust callbacks explicitly. It
-does not yet add `.ax` syntax, generated backend registration, preview parity,
+supports server-side `.ax` data bindings through the same registry in preview
+and generated Rust. It does not yet add automatic CLI/application registration,
 HTTP endpoints, or activate rich-text storage in Legura.
 
 ```rust
@@ -40,6 +41,35 @@ resources. Serialization may invoke custom user code. This API does not bound
 CPU time or all application memory. Authentication, CSRF, authorization and
 database transactions remain the action boundary's responsibility.
 
-Next: specify explicit application registration and typed `.ax` invocation;
-connect the same registry to preview and compiled execution; then integrate the
-validated editor document without exposing arbitrary raw HTML.
+## Backend Data Bindings
+
+```ax
+route POST "/prepare" {
+  data prepared = Native.call("content.prepare", {text: request.form.text})
+  return json(prepared)
+}
+```
+
+The name must be a literal source-owned registered name, not a request field.
+There is exactly one payload. Calls are supported as backend data bindings,
+not inside pure domain functions. Bind computed values before passing them to
+the callback. The Rust input/output are checked by the registry; this initial
+API does not infer an ASX record type or generate a native function schema.
+
+Configure the runtime at startup with `runtime.with_native_functions(native)`.
+The existing `AxRuntimeEnvAccess` capability interface (which already carries
+sessions) has an optional `runtime_native_call` method, defaulting to unavailable
+so existing custom runtimes remain source-compatible. `AxDatabaseRuntime`
+delegates it to its configured registry. Preview must receive this same
+configured runtime; there is no mock success or fallback to an empty value.
+
+`pwsh -File scripts/smoke-native-calls.ps1` builds and runs a separate generated
+Rust consumer and compares it with preview. It covers valid input, nested
+objects/lists, form/query values, invalid types, missing names, callback failure,
+payload limits and absent registration. It uses a new temporary application
+and an in-memory runtime, not an operator database.
+
+Next: explicit application/CLI package registration shared by development and
+production; field-aware recovery and typed rich output; then integrate the
+validated editor document without exposing arbitrary raw HTML. No package
+release or live CMS integration is implied by this unreleased foundation.
