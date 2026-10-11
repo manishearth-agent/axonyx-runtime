@@ -955,15 +955,33 @@ fn render_handler_fn(
         out.push_str("    let __ax_session = runtime.load_session(request)?;\n");
     }
     let mut typed_bindings = std::collections::BTreeMap::new();
+    let mut native_bindings = std::collections::BTreeSet::new();
     for step in globals.iter().chain(handler.steps.iter()) {
-        out.push_str(&render_step(
+        let rendered = render_step(
             step,
             handler,
             route_response,
             action_response,
             &mut typed_bindings,
             context,
-        )?);
+        )?;
+        out.push_str(
+            &crate::ax_native_codegen::rewrite_members(&rendered, &native_bindings)
+                .map_err(|_| AxBackendCodegenError::InvalidNativeCall)?,
+        );
+        if let AxStepPlan::Let { binding, value } = step {
+            let native = match value {
+                AxValuePlan::Call { path, .. } => path == &["Native", "call"],
+                AxValuePlan::Expr(expr) => {
+                    crate::ax_native_codegen::is_json_alias(&expr.code, &native_bindings)
+                }
+                _ => false,
+            };
+            native_bindings.remove(binding);
+            if native {
+                native_bindings.insert(binding.clone());
+            }
+        }
     }
 
     if !handler

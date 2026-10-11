@@ -9,6 +9,7 @@ pub mod ax_language_service;
 pub mod ax_local_symbols;
 pub mod ax_lowering;
 pub mod ax_native;
+mod ax_native_codegen;
 pub mod ax_parser;
 pub mod ax_parser_auto;
 pub mod ax_parser_v2;

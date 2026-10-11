@@ -56,6 +56,13 @@ not inside pure domain functions. Bind computed values before passing them to
 the callback. The Rust input/output are checked by the registry; this initial
 API does not infer an ASX record type or generate a native function schema.
 
+Local native results support JSON member access, for example `prepared.columns`,
+`prepared.items[0].text`, and `(prepared.columns).body`. Simple local aliases of
+these values retain JSON member access. The compiler lowers these members to JSON
+indexing, not Rust struct fields; unrelated typed record fields and string literals
+are unchanged. A missing member (including a member of null) produces null. This
+does not infer a typed native result or make arbitrary method calls JSON aliases.
+
 Configure the runtime at startup with `runtime.with_native_functions(native)`.
 The existing `AxRuntimeEnvAccess` capability interface (which already carries
 sessions) has an optional `runtime_native_call` method, defaulting to unavailable
@@ -66,7 +73,7 @@ configured runtime; there is no mock success or fallback to an empty value.
 `pwsh -File scripts/smoke-native-calls.ps1` builds and runs a separate generated
 Rust consumer and compares it with preview. It covers valid input, nested
 objects/lists, form/query values, invalid types, missing names, callback failure,
-payload limits and absent registration. It uses a new temporary application
+payload limits, member/alias access, action guards and absent registration. It uses a new temporary application
 and an in-memory runtime, not an operator database.
 
 Next: explicit application/CLI package registration shared by development and
