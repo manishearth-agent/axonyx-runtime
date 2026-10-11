@@ -60,6 +60,7 @@ fn main() {
     assert_eq!(compiled.body.into_bytes(), preview.body);
     for request in [
         AxHttpRequest::new("GET", "/nested?text=hello"),
+        AxHttpRequest::new("GET", "/members?text=hello"),
         AxHttpRequest::new("GET", "/prepare?text=old&text=hello+world"),
         AxHttpRequest::new("POST", "/form").with_body(b"text=hello".to_vec()),
     ] {
@@ -77,6 +78,10 @@ fn main() {
         assert_eq!(compiled.status, preview.status);
         assert_eq!(compiled.body.into_bytes(), preview.body);
     }
+    let members = backend::dispatch_api_route(&runtime, &AxHttpRequest::new("GET", "/members?text=hello"), false)
+        .unwrap().unwrap();
+    let members: serde_json::Value = serde_json::from_slice(&members.body.into_bytes()).unwrap();
+    assert_eq!(members, serde_json::json!({"text":"hello", "grouped":"hello", "missing":null, "literal":"prepared.items[0].text"}));
     for target in ["/invalid", "/unknown", "/prepare?text=reject"] {
         let request = AxHttpRequest::new("GET", target);
         let compiled = backend::dispatch_api_route(&runtime, &request, false)
@@ -137,5 +142,23 @@ fn main() {
             axonyx_core::ax_lowering::AxValue::from("hello")
         ),])
     );
+    for (body, valid) in [(b"text=hello".as_slice(), true), (b"text=%20".as_slice(), false)] {
+        let request = AxHttpRequest::new("POST", "/check").with_body(body.to_vec());
+        let compiled = backend::dispatch_action(&runtime, &AxUnavailableFileStorage, "CheckMember", &request)
+            .unwrap().unwrap();
+        let preview = execute_preview_action_request_sources_with_runtime_and_storage(
+            &[source], "CheckMember", &request, &runtime, &AxUnavailableFileStorage,
+            &mut AxPreviewStore::default()
+        ).unwrap();
+        if valid {
+            assert_eq!(compiled.payload["value"], "hello");
+            assert!(preview.error.is_none());
+            assert_eq!(preview.value, axonyx_core::ax_lowering::AxValue::from("hello"));
+        } else {
+            assert_eq!(compiled.payload["error"]["status"], 422);
+            assert_eq!(compiled.payload["error"]["value"]["fields"]["text"], "Required");
+            assert_eq!(preview.error.unwrap().status, 422);
+        }
+    }
     println!("Native calls: generated Rust and preview parity passed");
 }
