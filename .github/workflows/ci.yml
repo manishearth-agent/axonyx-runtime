@@ -29,6 +29,10 @@ jobs:
       - name: Run workspace tests
         run: cargo test --workspace --all-features
 
+      - name: Verify generated native calls against preview
+        shell: pwsh
+        run: ./scripts/smoke-native-calls.ps1
+
       - name: Run strict Clippy lint gate
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
 

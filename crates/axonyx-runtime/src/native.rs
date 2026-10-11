@@ -105,13 +105,7 @@ impl AxNativeRegistry {
 }
 
 fn valid_name(name: &str) -> bool {
-    !name.is_empty()
-        && name.len() <= 128
-        && name.split('.').all(|segment| {
-            let mut bytes = segment.bytes();
-            matches!(bytes.next(), Some(b'a'..=b'z' | b'A'..=b'Z' | b'_'))
-                && bytes.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-        })
+    axonyx_core::ax_native::is_native_function_name(name)
 }
 
 fn check_shape(value: &Value, limits: AxNativeLimits) -> Result<(), AxNativeError> {

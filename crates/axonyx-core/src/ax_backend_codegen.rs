@@ -6,6 +6,8 @@ use crate::ax_types::prelude::AxType;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AxBackendCodegenError {
+    #[error("Native.call requires a literal registered function name and one payload in a backend data binding")]
+    InvalidNativeCall,
     #[error("Uuid.new requires no arguments and is only supported in action/route data bindings")]
     InvalidUuidNewCall,
     #[error("Password.hash requires exactly one String argument")]
@@ -279,6 +281,9 @@ fn render_function_value_plan(
 ) -> Result<String, AxBackendCodegenError> {
     match value {
         AxValuePlan::Expr(expr) => Ok(render_owned_expr(expr)),
+        AxValuePlan::Call { path, .. } if path == &["Native", "call"] => {
+            Err(AxBackendCodegenError::InvalidNativeCall)
+        }
         AxValuePlan::Call { path, .. } if path == &["Uuid", "new"] => {
             Err(AxBackendCodegenError::InvalidUuidNewCall)
         }
@@ -1005,11 +1010,8 @@ fn __ax_loader_context(pattern: &str, request: &AxHttpRequest) -> AxRuntimeResul
         .ok_or_else(|| AxRuntimeError::message("compiled route did not match request"))?;
     let mut context = AxLoaderContext::new();
     for (name, value) in params { context = context.with_param(name, value); }
-    if let Some((_, query)) = request.target.split_once('?') {
-        for pair in query.split('&').filter(|pair| !pair.is_empty()) {
-            let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-            context = context.with_query(name.to_string(), value.to_string());
-        }
+    for (name, value) in request.query_fields() {
+        context = context.with_query(name, value);
     }
     Ok(context)
 }
@@ -1721,6 +1723,14 @@ fn render_value_plan(
     let output = match value {
         AxValuePlan::Expr(expr) => format!("json!({})", render_borrowed_expr(expr)),
         AxValuePlan::Call { path, args } => {
+            if path == &["Native", "call"] {
+                let name = crate::ax_native::native_call_name(args)
+                    .ok_or(AxBackendCodegenError::InvalidNativeCall)?;
+                return Ok(format!(
+                    "runtime.runtime_native_call({name:?}, {})?",
+                    render_native_payload(&args[1])?
+                ));
+            }
             if path == &["Uuid", "new"] {
                 if !args.is_empty()
                     || !matches!(
@@ -2062,6 +2072,47 @@ fn render_borrowed_expr(expr: &AxRustExpr) -> String {
     } else {
         format!("&{}", render_codegen_expr(&expr.code))
     }
+}
+
+// Lowered object/list literals need each leaf resolved against request context.
+// Wrapping the entire literal in json! leaves query/form members as Rust fields.
+fn render_native_payload(expr: &AxRustExpr) -> Result<String, AxBackendCodegenError> {
+    let code = expr.code.trim();
+    if let Some(fields) = code
+        .strip_prefix("json!({")
+        .and_then(|code| code.strip_suffix("})"))
+    {
+        let fields = split_codegen_args(fields)
+            .into_iter()
+            .map(|field| {
+                let mut key = serde_json::Deserializer::from_str(field).into_iter::<String>();
+                let name = key
+                    .next()
+                    .and_then(Result::ok)
+                    .ok_or(AxBackendCodegenError::InvalidNativeCall)?;
+                let value = field[key.byte_offset()..]
+                    .trim()
+                    .strip_prefix(':')
+                    .ok_or(AxBackendCodegenError::InvalidNativeCall)?;
+                Ok(format!(
+                    "{name:?}: {}",
+                    render_native_payload(&AxRustExpr::new(value.trim()))?
+                ))
+            })
+            .collect::<Result<Vec<_>, AxBackendCodegenError>>()?;
+        return Ok(format!("json!({{{}}})", fields.join(", ")));
+    }
+    if let Some(items) = code
+        .strip_prefix("vec![")
+        .and_then(|code| code.strip_suffix(']'))
+    {
+        let items = split_codegen_args(items)
+            .into_iter()
+            .map(|item| render_native_payload(&AxRustExpr::new(item)))
+            .collect::<Result<Vec<_>, _>>()?;
+        return Ok(format!("json!([{}])", items.join(", ")));
+    }
+    Ok(format!("json!({})", render_borrowed_expr(expr)))
 }
 
 fn render_literal_revalidation_target(expr: &AxRustExpr) -> String {
