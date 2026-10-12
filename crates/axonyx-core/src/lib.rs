@@ -4,6 +4,7 @@ pub mod ax_backend_ast;
 pub mod ax_backend_codegen;
 pub mod ax_backend_lowering;
 pub mod ax_backend_parser;
+mod ax_domain_codegen;
 pub mod ax_formatter;
 pub mod ax_language_service;
 pub mod ax_local_symbols;
