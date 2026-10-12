@@ -1,6 +1,6 @@
 # Domain function validation V0
 
-This is unreleased compiler work, not part of the published 0.6.7 core.
+Release candidate: core/runtime 0.6.8. Publication is pending release CI.
 
 Pure Domain functions may return a declared record and use `.length` in their
 calculations. Their generated Rust ABI now returns `Result<T, AxRuntimeError>`.
