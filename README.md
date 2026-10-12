@@ -30,6 +30,10 @@ axonyx-runtime = { git = "https://github.com/vladanPro/axonyx-runtime" }
 
 ## Local Development
 
+The unreleased [Native Functions V0 foundation](docs/native-functions-v0.md)
+provides explicit typed Rust callbacks and a server-side `Native.call` data
+binding. Automatic CLI/application package registration is not implemented yet.
+
 ### Login Protection Primitives (Since 0.5.0)
 
 `password::AxPassword::verify_optional(password, stored_hash)` performs a dummy

@@ -1,0 +1,42 @@
+route GET "/prepare" {
+  data prepared = Native.call("content.prepare", {text: query.text})
+  return json(prepared)
+}
+
+route GET "/invalid" {
+  data prepared = Native.call("content.prepare", {text: 42})
+  return json(prepared)
+}
+
+route GET "/unknown" {
+  data prepared = Native.call("content.missing", {text: "hello"})
+  return json(prepared)
+}
+
+route POST "/form" {
+  data prepared = Native.call("content.prepare", {text: request.form.text})
+  return json(prepared)
+}
+
+route GET "/nested" {
+  data prepared = Native.call("content.batch", {items: [{text: query.text}], "meta:kind": "direct,prepare"})
+  return json(prepared)
+}
+
+action PrepareContent(text: String) {
+  data prepared = Native.call("content.prepare", {text: input.text})
+  return prepared
+}
+
+route GET "/members" {
+  data prepared = Native.call("content.batch", {items: [{text: query.text}], "meta:kind": "direct,prepare"})
+  data selected = prepared.items[0]
+  return json({text: selected.text, grouped: (prepared.items)[0].text, missing: prepared.absent.child, literal: "prepared.items[0].text"})
+}
+
+action CheckMember(text: String) {
+  data prepared = Native.call("content.prepare", {text: input.text})
+  require prepared.text != "" else invalid({text: "Required"})
+  data copied = Native.call("content.prepare", {text: prepared.text})
+  return copied.text
+}

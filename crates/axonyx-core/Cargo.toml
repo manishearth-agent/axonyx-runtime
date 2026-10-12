@@ -1,6 +1,6 @@
 [package]
 name = "axonyx-core"
-version = "0.6.6"
+version = "0.6.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -17,3 +17,4 @@ thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 axonyx-macros = { version = "0.1.0", path = "../axonyx-macros" }
+proc-macro2 = { workspace = true, features = ["span-locations"] }

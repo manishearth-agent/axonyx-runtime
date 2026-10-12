@@ -4,6 +4,7 @@ pub mod form_result;
 pub mod input;
 pub mod login_throttle;
 pub mod mutation_security;
+pub mod native;
 pub mod password;
 pub mod server;
 pub mod session;
@@ -2853,6 +2854,21 @@ fn eval_preview_value_with_functions(
 ) -> Result<AxValue, PreviewError> {
     match value {
         AxValuePlan::Expr(expr) => eval_preview_expr_with_functions(expr, scope, env, functions),
+        AxValuePlan::Call { path, args } if path == &["Native", "call"] => {
+            let name = axonyx_core::ax_native::native_call_name(args).ok_or_else(|| {
+                PreviewError::Runtime { message: "Native.call requires a literal registered function name and one payload in a backend data binding".to_string() }
+            })?;
+            let runtime = runtime.ok_or_else(|| PreviewError::Runtime {
+                message: "native functions are unavailable for this backend runtime".to_string(),
+            })?;
+            let input = eval_preview_expr_with_functions(&args[1], scope, env, functions)?;
+            runtime
+                .runtime_native_call(&name, preview_value_to_json(&input))
+                .map(preview_json_to_value)
+                .map_err(|error| PreviewError::Runtime {
+                    message: error.to_string(),
+                })
+        }
         AxValuePlan::Call { path, args } if path == &["Password", "verifyOptional"] => {
             let invalid = || {
                 PreviewError::Runtime { message: "Password.verifyOptional requires (String password, optionalRecord?.stringField)".to_string() }
@@ -3326,6 +3342,29 @@ fn eval_preview_expr_with_functions(
     // Lowering emits Rust grouping and operators, not authoring syntax.
     if let Ok(parsed) = syn::parse_str::<syn::Expr>(code) {
         match parsed {
+            syn::Expr::Field(field) if preview_scoped_member_base(&field.base, scope) => {
+                let value = eval_preview_expr_with_functions(
+                    &AxRustExpr::new(preview_rust_expr_source(&field.base)),
+                    scope,
+                    env,
+                    functions,
+                )?;
+                let syn::Member::Named(name) = field.member else {
+                    return Err(PreviewError::Runtime {
+                        message: "record member expects a field name".into(),
+                    });
+                };
+                return match value {
+                    AxValue::Record(fields) => Ok(fields
+                        .get(&name.to_string())
+                        .cloned()
+                        .unwrap_or(AxValue::Null)),
+                    AxValue::Null => Ok(AxValue::Null),
+                    _ => Err(PreviewError::Runtime {
+                        message: "member access expects a record".into(),
+                    }),
+                };
+            }
             syn::Expr::Try(expr) => {
                 if matches!(expr.expr.as_ref(), syn::Expr::Call(call)
                     if matches!(call.func.as_ref(), syn::Expr::Path(path) if path.path.is_ident("__ax_length") || path.path.is_ident("__ax_is_null")))
@@ -3610,6 +3649,19 @@ fn eval_preview_expr_with_functions(
     Err(PreviewError::Runtime {
         message: format!("preview loader expression `{code}` is not supported yet"),
     })
+}
+
+fn preview_scoped_member_base(expr: &syn::Expr, scope: &BTreeMap<String, AxValue>) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .get_ident()
+            .is_some_and(|name| scope.contains_key(&name.to_string())),
+        syn::Expr::Field(field) => preview_scoped_member_base(&field.base, scope),
+        syn::Expr::Index(index) => preview_scoped_member_base(&index.expr, scope),
+        syn::Expr::Paren(paren) => preview_scoped_member_base(&paren.expr, scope),
+        _ => false,
+    }
 }
 
 fn preview_rust_expr_source(expr: &syn::Expr) -> String {
