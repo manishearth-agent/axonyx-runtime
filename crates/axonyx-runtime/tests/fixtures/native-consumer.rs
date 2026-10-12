@@ -42,6 +42,22 @@ fn runtime(limits: AxNativeLimits) -> AxDatabaseRuntime<MemoryAdapter> {
 }
 
 fn main() {
+    let valid = backend::validatePost("t".repeat(160), "s".repeat(120), "b".repeat(20000), "published".into()).unwrap();
+    assert!(valid.title && valid.slug && valid.body && valid.status);
+    let copied = backend::copyValidation(&valid).unwrap();
+    assert!(valid.title && copied.title);
+    let invalid = backend::validatePost("t".repeat(161), "s".repeat(121), "b".repeat(20001), "unknown".into()).unwrap();
+    assert!(!invalid.title && !invalid.slug && !invalid.body && !invalid.status);
+    let empty = backend::validatePost("".into(), "".into(), "".into(), "draft".into()).unwrap();
+    assert!(!empty.title && !empty.slug && !empty.body && empty.status);
+    assert_eq!(backend::countText("\u{1f642}a".into()).unwrap(), 3);
+    assert_eq!(backend::countItems(vec!["a".into(), "b".into()]).unwrap(), 2);
+    assert_eq!(backend::countItems(vec![]).unwrap(), 0);
+    assert_eq!(backend::repeatText("hello".into()).unwrap(), "hellohello");
+    assert!(backend::countDynamic(serde_json::json!(42)).unwrap_err().to_string().contains("length expects"));
+    let bad_record = backend::invalidValidation().unwrap_err().to_string();
+    assert!(bad_record.contains("does not match declared record"));
+    assert!(!bad_record.contains("private details"));
     let source = include_str!("native-backend.ax");
     let runtime = runtime(AxNativeLimits::default());
     let request = AxHttpRequest::new("GET", "/prepare?t%65xt=%20hello%20");
@@ -160,5 +176,20 @@ fn main() {
             assert_eq!(preview.error.unwrap().status, 422);
         }
     }
-    println!("Native calls: generated Rust and preview parity passed");
+    for (body, valid) in [("title=hello&slug=hello&body=content&status=draft", true), ("title=&slug=hello&body=content&status=draft", false)] {
+        let request = AxHttpRequest::new("POST", "/check-post").with_body(body.as_bytes().to_vec());
+        let compiled = backend::dispatch_action(&runtime, &AxUnavailableFileStorage, "CheckPost", &request).unwrap().unwrap();
+        let preview = execute_preview_action_request_sources_with_runtime_and_storage(&[source], "CheckPost", &request, &runtime, &AxUnavailableFileStorage, &mut AxPreviewStore::default()).unwrap();
+        if valid {
+            assert_eq!(compiled.payload["value"]["title"], true);
+            assert!(preview.error.is_none());
+        } else {
+            assert_eq!(compiled.payload["error"]["status"], 422);
+            assert_eq!(preview.error.unwrap().status, 422);
+        }
+    }
+    let request = AxHttpRequest::new("POST", "/reuse").with_body(b"text=hello".to_vec());
+    let reused = backend::dispatch_action(&runtime, &AxUnavailableFileStorage, "ReuseHelper", &request).unwrap().unwrap();
+    assert_eq!(reused.payload["value"], serde_json::json!({"first":"hello", "second":"hello", "original":"hello", "literal":"identityText(input.text)"}));
+    println!("Native/Domain calls: generated Rust and preview parity passed");
 }
