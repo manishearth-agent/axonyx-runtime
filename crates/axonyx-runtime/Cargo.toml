@@ -1,6 +1,6 @@
 [package]
 name = "axonyx-runtime"
-version = "0.6.6"
+version = "0.6.7"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -37,7 +37,7 @@ zeroize_derive.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 bytes.workspace = true
-axonyx-core = { version = "0.6.6", path = "../axonyx-core" }
+axonyx-core = { version = "0.6.7", path = "../axonyx-core" }
 axum = { workspace = true, optional = true }
 hyper-util = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
