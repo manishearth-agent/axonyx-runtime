@@ -40,3 +40,62 @@ action CheckMember(text: String) {
   data copied = Native.call("content.prepare", {text: prepared.text})
   return copied.text
 }
+
+export type PostValidation {
+  title: Bool
+  slug: Bool
+  body: Bool
+  status: Bool
+  titleError: String
+}
+
+export fn validatePost(title: String, slug: String, body: String, status: String) -> PostValidation {
+  data titleValid = title != "" && title.length <= 160
+  data slugValid = slug != "" && slug.length <= 120
+  data bodyValid = body != "" && body.length <= 20000
+  data statusValid = status == "draft" || status == "published"
+  return { title: titleValid, slug: slugValid, body: bodyValid, status: statusValid, titleError: "Invalid title" }
+}
+
+export fn identityText(text: String) -> String {
+  return text
+}
+
+export fn repeatText(text: String) -> String {
+  data first = identityText(text)
+  data second = identityText(text)
+  return first + second
+}
+
+export fn countText(text: String) -> Int {
+  return text.length
+}
+
+export fn countItems(items: String[]) -> Int {
+  return items.length
+}
+
+export fn countDynamic(value: Json) -> Int {
+  return value.length
+}
+
+export fn copyValidation(validation: PostValidation) -> PostValidation {
+  return validation
+}
+
+export fn invalidValidation() -> PostValidation {
+  return { title: "not a Bool", slug: true, body: true, status: true, titleError: "private details" }
+}
+
+action CheckPost(title: String, slug: String, body: String, status: String) {
+  data validation = validatePost(input.title, input.slug, input.body, input.status)
+  require validation["title"] else invalid({ title: validation["titleError"] })
+  return validation
+}
+
+action ReuseHelper(text: String) {
+  data first = identityText(input.text)
+  data second = identityText(identityText(input.text))
+  require identityText(input.text) != "" else invalid({text: "Required"})
+  return { first: first, second: second, original: input.text, literal: "identityText(input.text)" }
+}

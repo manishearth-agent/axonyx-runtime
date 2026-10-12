@@ -6,6 +6,8 @@ use crate::ax_types::prelude::AxType;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AxBackendCodegenError {
+    #[error("invalid declared Domain function call or argument count")]
+    InvalidDomainFunctionCall,
     #[error("Native.call requires a literal registered function name and one payload in a backend data binding")]
     InvalidNativeCall,
     #[error("Uuid.new requires no arguments and is only supported in action/route data bindings")]
@@ -215,11 +217,11 @@ fn render_function_fn(
             let rust_ty = if context.record_names.contains(&field.rust_ty) {
                 format!("&{}", field.rust_ty)
             } else {
-                field.rust_ty.clone()
+                map_backend_return_type(&field.rust_ty, &function.name)?
             };
-            format!("{}: {rust_ty}", field.name)
+            Ok(format!("{}: {rust_ty}", field.name))
         })
-        .collect::<Vec<_>>()
+        .collect::<Result<Vec<_>, AxBackendCodegenError>>()?
         .join(", ");
     let returns = function
         .returns
@@ -230,23 +232,35 @@ fn render_function_fn(
 
     let visibility = if function.exported { "pub " } else { "" };
     let mut out = format!(
-        "{visibility}fn {}({params}) -> {returns} {{\n",
+        "{visibility}fn {}({params}) -> Result<{returns}, AxRuntimeError> {{\n",
         function.name
     );
     for step in &function.steps {
-        out.push_str(&render_function_step(
-            step,
-            &returns,
-            &function.name,
-            context,
-        )?);
+        let step = render_function_step(step, &returns, &function.name, context)?;
+        out.push_str(
+            &crate::ax_domain_codegen::rewrite_calls(
+                &step,
+                context.functions,
+                context.record_names,
+            )
+            .map_err(|_| AxBackendCodegenError::InvalidDomainFunctionCall)?,
+        );
     }
     if !function
         .steps
         .iter()
         .any(|step| matches!(step, AxStepPlan::Return(_)))
     {
-        out.push_str(&format!("    {}\n", default_function_return_expr(&returns)));
+        if context.record_names.contains(&returns) {
+            out.push_str(
+                "    Err(AxRuntimeError::message(\"domain helper has no record return value\"))\n",
+            );
+        } else {
+            out.push_str(&format!(
+                "    Ok({})\n",
+                default_function_return_expr(&returns)
+            ));
+        }
     }
     out.push_str("}\n");
     Ok(out)
@@ -264,11 +278,12 @@ fn render_function_step(
         }
     }
     match step {
-        AxStepPlan::Let { binding, value } => Ok(format!(
-            "    let {binding} = {};\n",
-            render_function_value_plan(value, function, binding, context)?
-        )),
-        AxStepPlan::Return(value) => Ok(render_function_return(value, returns)),
+        AxStepPlan::Let { binding, value } => {
+            let expression = render_function_value_plan(value, function, binding)?;
+            let expression = strip_wrapping_parentheses(&expression).unwrap_or(&expression);
+            Ok(format!("    let {binding} = {expression};\n"))
+        }
+        AxStepPlan::Return(value) => Ok(render_function_return(value, returns, context)),
         other => Ok(format!("    // unsupported domain fn step: {other:?}\n")),
     }
 }
@@ -277,7 +292,6 @@ fn render_function_value_plan(
     value: &AxValuePlan,
     function: &str,
     binding: &str,
-    context: &AxBackendRenderContext<'_>,
 ) -> Result<String, AxBackendCodegenError> {
     match value {
         AxValuePlan::Expr(expr) => Ok(render_owned_expr(expr)),
@@ -299,12 +313,7 @@ fn render_function_value_plan(
                 handler: function.to_string(),
             })
         }
-        AxValuePlan::Call { path, args } => Ok(render_declared_function_call(
-            path,
-            args,
-            context.functions,
-            context.record_names,
-        )),
+        AxValuePlan::Call { path, args } => Ok(render_call_expr(path, args)),
         AxValuePlan::Query(_) | AxValuePlan::StorageSave { .. } => {
             Err(AxBackendCodegenError::UnsupportedFunctionQueryBinding {
                 function: function.to_string(),
@@ -314,23 +323,32 @@ fn render_function_value_plan(
     }
 }
 
-fn render_function_return(value: &AxReturnPlan, returns: &str) -> String {
+fn render_function_return(
+    value: &AxReturnPlan,
+    returns: &str,
+    context: &AxBackendRenderContext<'_>,
+) -> String {
     match value {
         AxReturnPlan::Expr(expr) | AxReturnPlan::Json(expr) => {
-            format!("    return {};\n", coerce_return_expr(expr, returns))
+            if context.record_names.contains(returns) {
+                format!("    return serde_json::from_value::<{returns}>(json!({})).map_err(|_| AxRuntimeError::message(\"domain helper return does not match declared record\"));\n", render_borrowed_expr(expr))
+            } else {
+                format!("    return Ok({});\n", coerce_return_expr(expr, returns))
+            }
         }
-        AxReturnPlan::Ok => format!("    return {};\n", default_function_return_expr(returns)),
+        AxReturnPlan::Ok if context.record_names.contains(returns) => "    return Err(AxRuntimeError::message(\"domain helper has no record return value\"));\n".into(),
+        AxReturnPlan::Ok => format!("    return Ok({});\n", default_function_return_expr(returns)),
         AxReturnPlan::NoContent => {
-            format!("    return {};\n", default_function_return_expr(returns))
+            format!("    return Ok({});\n", default_function_return_expr(returns))
         }
         AxReturnPlan::NotFound => {
-            format!("    return {};\n", default_function_return_expr(returns))
+            format!("    return Ok({});\n", default_function_return_expr(returns))
         }
         AxReturnPlan::Forbidden => {
-            format!("    return {};\n", default_function_return_expr(returns))
+            format!("    return Ok({});\n", default_function_return_expr(returns))
         }
         AxReturnPlan::Redirect { .. } => {
-            format!("    return {};\n", default_function_return_expr(returns))
+            format!("    return Ok({});\n", default_function_return_expr(returns))
         }
     }
 }
@@ -965,13 +983,29 @@ fn render_handler_fn(
             &mut typed_bindings,
             context,
         )?;
+        let rendered = crate::ax_domain_codegen::rewrite_calls(
+            &rendered,
+            context.functions,
+            context.record_names,
+        )
+        .map_err(|_| AxBackendCodegenError::InvalidDomainFunctionCall)?;
         out.push_str(
             &crate::ax_native_codegen::rewrite_members(&rendered, &native_bindings)
                 .map_err(|_| AxBackendCodegenError::InvalidNativeCall)?,
         );
         if let AxStepPlan::Let { binding, value } = step {
             let native = match value {
-                AxValuePlan::Call { path, .. } => path == &["Native", "call"],
+                AxValuePlan::Call { path, .. } => {
+                    path == &["Native", "call"]
+                        || (path.len() == 1
+                            && context.functions.iter().any(|function| {
+                                function.name == path[0]
+                                    && function
+                                        .returns
+                                        .as_ref()
+                                        .is_some_and(|ty| context.record_names.contains(ty))
+                            }))
+                }
                 AxValuePlan::Expr(expr) => {
                     crate::ax_native_codegen::is_json_alias(&expr.code, &native_bindings)
                 }
@@ -1856,15 +1890,7 @@ fn render_value_plan(
                     format!("compiled query function `{}` was not registered", query.name)
                 )
             } else {
-                format!(
-                    "json!(&{})",
-                    render_declared_function_call(
-                        path,
-                        args,
-                        context.functions,
-                        context.record_names,
-                    )
-                )
+                format!("json!(&{})", render_call_expr(path, args))
             }
         }
         AxValuePlan::StorageSave { capability, input } => {
@@ -1896,39 +1922,6 @@ fn render_call_expr(path: &[String], args: &[AxRustExpr]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("{target}({args})")
-}
-
-fn render_declared_function_call(
-    path: &[String],
-    args: &[AxRustExpr],
-    functions: &[AxFunctionPlan],
-    record_names: &std::collections::BTreeSet<String>,
-) -> String {
-    let [name] = path else {
-        return render_call_expr(path, args);
-    };
-    let Some(function) = functions.iter().find(|function| function.name == *name) else {
-        return render_call_expr(path, args);
-    };
-
-    let args = args
-        .iter()
-        .enumerate()
-        .map(|(index, arg)| {
-            let rendered = render_owned_expr(arg);
-            if function
-                .input
-                .get(index)
-                .is_some_and(|field| record_names.contains(&field.rust_ty))
-            {
-                format!("&{rendered}")
-            } else {
-                rendered
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!("{}({args})", path.join("::"))
 }
 
 fn render_query_plan(query: &AxQueryPlan) -> String {
@@ -2945,7 +2938,7 @@ loader PostsList() -> Post[] {
             "pub result: Result<String, String>,",
             "pub publicSlug: String,",
             "pub secretDraft: String,",
-            "pub fn emptyPosts() -> Vec<Post>",
+            "pub fn emptyPosts() -> Result<Vec<Post>, AxRuntimeError>",
         ] {
             assert!(module.contains(expected), "missing `{expected}`\n{module}");
         }
@@ -3307,11 +3300,12 @@ loader PostsList
         ])
         .expect("backend bundle should compile");
 
-        assert!(module.contains("pub fn normalizeStatus(status: String) -> String"));
-        assert!(module.contains("return (status).to_string();"));
-        assert!(
-            module.contains(r#"let status = json!(&normalizeStatus("published".to_string()));"#)
-        );
+        assert!(module
+            .contains("pub fn normalizeStatus(status: String) -> Result<String, AxRuntimeError>"));
+        assert!(module.contains("return Ok((status).to_string());"));
+        assert!(module.contains(
+            r#"let status = json!(&normalizeStatus(("published".to_string()).clone())?);"#
+        ));
     }
 
     #[test]
@@ -3693,10 +3687,13 @@ route GET "/api/admin" -> User {
         )
         .expect("record policy helper should borrow the narrowed route binding");
 
-        assert!(module.contains("fn hasRole(user: &User, role: String) -> bool"));
+        assert!(module
+            .contains("fn hasRole(user: &User, role: String) -> Result<bool, AxRuntimeError>"));
         assert!(!module.contains("pub fn hasRole(user: &User"));
-        assert!(module.contains("return user.role == role;"));
-        assert!(module.contains(r#"let isAdmin = json!(&hasRole(&user, "admin".to_string()));"#));
+        assert!(module.contains("return Ok(user.role == role);"));
+        assert!(module.contains(
+            r#"let isAdmin = json!(&hasRole(&(user), ("admin".to_string()).clone())?);"#
+        ));
         assert!(module.contains("AxHttpResponse::json(200, &json!(&user))"));
         assert!(!module.contains("hasRole(user.clone()"));
     }
