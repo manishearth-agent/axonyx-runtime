@@ -262,7 +262,24 @@ fn replay_control(
     else {
         return;
     };
-    if !allowed.contains(&name) || attrs.iter().any(|attr| attr.name == "disabled") {
+    // Opted-in recovery text stays disabled; replay never enables submission.
+    let disabled_recovery = tag == "textarea"
+        && attrs
+            .iter()
+            .any(|attr| attr.name == "data-ax-retain-disabled" && attr.value == "true");
+    if !allowed.contains(&name)
+        || (attrs.iter().any(|attr| attr.name == "disabled") && !disabled_recovery)
+    {
+        return;
+    }
+    if attrs.iter().any(|attr| {
+        attr.name == "autocomplete"
+            && attr.value.split_ascii_whitespace().any(|token| {
+                ["current-password", "new-password", "one-time-code"]
+                    .iter()
+                    .any(|secret| token.eq_ignore_ascii_case(secret))
+            })
+    }) {
         return;
     }
     let value = submitted.get(&name);
@@ -273,16 +290,6 @@ fn replay_control(
                 .find(|attr| attr.name == "type")
                 .map(|attr| attr.value.to_ascii_lowercase())
                 .unwrap_or_else(|| "text".into());
-            if attrs.iter().any(|attr| {
-                attr.name == "autocomplete"
-                    && attr.value.split_ascii_whitespace().any(|token| {
-                        ["current-password", "new-password", "one-time-code"]
-                            .iter()
-                            .any(|secret| token.eq_ignore_ascii_case(secret))
-                    })
-            }) {
-                return;
-            }
             if matches!(kind.as_str(), "checkbox" | "radio") {
                 let expected = attrs
                     .iter()
@@ -319,6 +326,10 @@ fn replay_control(
         "textarea" => {
             if let Some(value) = value {
                 *children = vec![AxNode::Text(value.clone())];
+                if disabled_recovery {
+                    attrs.retain(|attr| attr.name != "data-ax-retained");
+                    attrs.push(attr("data-ax-retained", "true"));
+                }
             }
         }
         "select" if !attrs.iter().any(|attr| attr.name == "multiple") => {
@@ -381,6 +392,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn disabled_recovery_requires_a_textarea_opt_in_and_form_allowlist() {
+        use axonyx_core::reactive::{attr, element_with_attrs, text};
+        let result = AxFormResult::validation("Save", "/posts", &serde_json::json!({}))
+            .unwrap()
+            .with_request_values(&replay_request(
+                "document=%3C%2Ftextarea%3E%3Cscript%3E&password=PRIVATE",
+            ));
+        for (tag, marker, allowed, expected) in [
+            ("textarea", "true", "document", true),
+            ("textarea", "false", "document", false),
+            ("textarea", "true", "other", false),
+            ("input", "true", "document", false),
+            ("textarea", "true", "password", false),
+        ] {
+            let name = if allowed == "password" {
+                "password"
+            } else {
+                "document"
+            };
+            let mut node = element_with_attrs(
+                "form",
+                vec![
+                    attr("action", "/__axonyx/action?name=Save&path=%2Fposts"),
+                    attr("data-ax-retain-fields", allowed),
+                ],
+                vec![element_with_attrs(
+                    tag,
+                    vec![
+                        attr("name", name),
+                        attr("disabled", "true"),
+                        attr("data-ax-retain-disabled", marker),
+                    ],
+                    vec![text("Original")],
+                )],
+            );
+            result.apply_to_node(&mut node);
+            let axonyx_core::reactive::AxNode::Element { children, .. } = node else {
+                panic!("form")
+            };
+            let axonyx_core::reactive::AxNode::Element {
+                attrs, children, ..
+            } = &children[0]
+            else {
+                panic!("control")
+            };
+            assert!(attrs.iter().any(|attr| attr.name == "disabled"));
+            assert_eq!(
+                attrs.iter().any(|attr| attr.name == "data-ax-retained"),
+                expected
+            );
+            assert_eq!(
+                children,
+                &vec![text(if expected {
+                    "</textarea><script>"
+                } else {
+                    "Original"
+                })]
+            );
+        }
+        assert!(!serde_json::to_string(&result).unwrap().contains("PRIVATE"));
+        assert!(!format!("{result:?}").contains("PRIVATE"));
+    }
+
+    #[test]
+    fn opted_in_recovery_is_escaped_and_secret_autocomplete_is_excluded() {
+        use axonyx_core::reactive::{attr, text};
+        let mut attrs = vec![
+            attr("name", "document"),
+            attr("disabled", "true"),
+            attr("data-ax-retain-disabled", "true"),
+            attr("autocomplete", "section-editor ONE-TIME-CODE"),
+        ];
+        let mut children = vec![text("Original")];
+        replay_control(
+            "textarea",
+            &mut attrs,
+            &mut children,
+            &["document".into()],
+            &BTreeMap::from([("document".into(), "PRIVATE".into())]),
+        );
+        assert_eq!(children, vec![text("Original")]);
+        assert!(!attrs.iter().any(|attr| attr.name == "data-ax-retained"));
+        let result = AxFormResult::validation("Save", "/posts", &serde_json::json!({}))
+            .unwrap()
+            .with_request_values(&replay_request("recovery=%3C%2Ftextarea%3E%3Cscript%3E"));
+        let html = replay_document(&result);
+        assert!(html.contains("&lt;/textarea&gt;&lt;script&gt;"));
+        assert!(html.contains("data-ax-retained=\"true\""));
+        assert!(!html.contains("<script>"));
+    }
+
+    #[test]
     fn replay_respects_radio_disabled_and_secret_autocomplete_controls() {
         use axonyx_core::reactive::attr;
         let values = BTreeMap::from([("choice".into(), "gold".into())]);
@@ -424,9 +527,10 @@ mod tests {
 page Form() {
   return ASX {
     <>
-      <form action="/__axonyx/action?name=Save&amp;path=%2Fposts" data-ax-retain-fields="title,summary,palette,enabled,secret,password,opaque,hidden,file">
+      <form action="/__axonyx/action?name=Save&amp;path=%2Fposts" data-ax-retain-fields="title,summary,palette,enabled,secret,password,opaque,hidden,file,recovery">
         <input name="title" value="Initial" />
         <textarea name="summary">Initial summary</textarea>
+        <textarea name="recovery" data-ax-retain-disabled="true" disabled="true"></textarea>
         <select name="palette"><option value="silver" selected={true}>Silver</option><optgroup label="Metals"><option value="gold">Gold</option></optgroup></select>
         <input type="checkbox" name="enabled" checked={true} />
         <input name="unlisted" value="Initial unlisted" />
