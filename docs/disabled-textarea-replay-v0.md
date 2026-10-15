@@ -25,4 +25,6 @@ must not silently replace invalid retained input with stale stored content.
 This does not bypass server write validation or repair persisted rows. The
 marker distinguishes a native retry from ordinary field values during remount.
 
-This source feature requires a runtime release before registry consumers use it.
+This behavior requires axonyx-runtime 0.6.9 or newer. Registry consumers must
+resolve that runtime version; installing a CLI alone does not change a locked
+application dependency. See runtime-0.6.9.md for the release scope and gates.
