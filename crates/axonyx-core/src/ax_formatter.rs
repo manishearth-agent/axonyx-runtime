@@ -63,7 +63,15 @@ pub fn format_ax_source_with_options(source: &str, options: AxFormatOptions) -> 
 
         let alignment = leading_alignment(line, scanner.pending_tag);
         let line_depth = depth.saturating_sub(alignment);
-        formatted.push(format!("{}{}", indent_unit.repeat(line_depth), line));
+        let expanded = if !scanner.pending_tag && scanner.quote.is_none() && !scanner.block_comment
+        {
+            expand_compact_markup(line, &indent_unit)
+        } else {
+            None
+        };
+        for part in expanded.as_deref().unwrap_or(&[line.to_string()]) {
+            formatted.push(format!("{}{}", indent_unit.repeat(line_depth), part));
+        }
         previous_blank = false;
 
         let balance = scanner.scan_line(line);
@@ -91,6 +99,155 @@ fn is_raw_block_start(line: &str) -> bool {
         line.strip_prefix(keyword)
             .is_some_and(|rest| rest.trim_start().starts_with('{'))
     })
+}
+
+struct InlineMarkup<'a> {
+    source: &'a str,
+    open: &'a str,
+    close: &'a str,
+    children: Vec<InlineMarkup<'a>>,
+    mixed: bool,
+}
+
+// Only expand complete element-only containers. Leaf text and mixed prose keep
+// their exact source bytes; the parser equality check is the final safety gate.
+fn expand_compact_markup(line: &str, indent: &str) -> Option<Vec<String>> {
+    let (node, consumed) = inline_markup(line, 0)?;
+    if consumed != line.len() || node.mixed || node.children.is_empty() {
+        return None;
+    }
+    fn emit(node: &InlineMarkup<'_>, prefix: &str, indent: &str, lines: &mut Vec<String>) {
+        if node.mixed || node.children.is_empty() {
+            lines.push(format!("{prefix}{}", node.source));
+        } else {
+            lines.push(format!("{prefix}{}", node.open));
+            for child in &node.children {
+                emit(child, &format!("{prefix}{indent}"), indent, lines);
+            }
+            lines.push(format!("{prefix}{}", node.close));
+        }
+    }
+    let mut lines = Vec::new();
+    emit(&node, "", indent, &mut lines);
+    let wrap = |markup: &str| format!("page FormatProbe() {{\nreturn ASX {{\n{markup}\n}}\n}}");
+    let before = crate::ax_parser_v2::parse_ax_v2(&wrap(line)).ok()?;
+    let after = crate::ax_parser_v2::parse_ax_v2(&wrap(&lines.join("\n"))).ok()?;
+    (before == after).then_some(lines)
+}
+
+fn inline_markup(source: &str, depth: usize) -> Option<(InlineMarkup<'_>, usize)> {
+    if depth > 128 || !source.starts_with('<') || source.starts_with("</") {
+        return None;
+    }
+    let open_end = inline_tag_end(source)?;
+    let open = &source[..open_end];
+    let name = open[1..].split([' ', '\t', '/', '>']).next()?;
+    if !name.is_empty()
+        && !name
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '.' | '-'))
+    {
+        return None;
+    }
+    if open.ends_with("/>") {
+        return Some((
+            InlineMarkup {
+                source: open,
+                open,
+                close: "",
+                children: Vec::new(),
+                mixed: false,
+            },
+            open_end,
+        ));
+    }
+    let closing = format!("</{name}>");
+    let mut cursor = open_end;
+    let mut children = Vec::new();
+    let mut mixed = matches!(name, "pre" | "code" | "script" | "style" | "textarea");
+    loop {
+        let remaining = source.get(cursor..)?;
+        if remaining.starts_with(&closing) {
+            let end = cursor + closing.len();
+            return Some((
+                InlineMarkup {
+                    source: &source[..end],
+                    open,
+                    close: &source[cursor..end],
+                    children,
+                    mixed,
+                },
+                end,
+            ));
+        }
+        if remaining.starts_with('<') {
+            let (child, length) = inline_markup(remaining, depth + 1)?;
+            children.push(child);
+            cursor += length;
+        } else {
+            // Expressions may contain strings that look like markup.
+            let length = if remaining.starts_with('{') {
+                inline_expression_end(remaining)?
+            } else {
+                remaining.chars().next()?.len_utf8()
+            };
+            mixed = true;
+            cursor += length;
+        }
+    }
+}
+
+fn inline_expression_end(source: &str) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, ch) in source.char_indices() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+        } else if matches!(ch, '\'' | '"' | '`') {
+            quote = Some(ch);
+        } else if ch == '{' {
+            depth += 1;
+        } else if ch == '}' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index + 1);
+            }
+        }
+    }
+    None
+}
+
+fn inline_tag_end(source: &str) -> Option<usize> {
+    let mut cursor = 1;
+    let mut quote = None;
+    let mut escaped = false;
+    while let Some(ch) = source.get(cursor..)?.chars().next() {
+        if let Some(active) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == active {
+                quote = None;
+            }
+        } else if matches!(ch, '\'' | '"') {
+            quote = Some(ch);
+        } else if ch == '{' {
+            cursor += inline_expression_end(&source[cursor..])?;
+            continue;
+        } else if ch == '>' {
+            return Some(cursor + 1);
+        }
+        cursor += ch.len_utf8();
+    }
+    None
 }
 
 fn leading_alignment(line: &str, pending_tag: bool) -> usize {
@@ -299,6 +456,62 @@ mod tests {
         let formatted = format_ax_source(source);
         assert_eq!(formatted, expected);
         assert_eq!(format_ax_source(&formatted), expected);
+    }
+
+    #[test]
+    fn expands_nested_table_rows_without_changing_the_ast() {
+        let source = "page Posts() {\nreturn ASX {\n<TableRow><TableCell><a href=\"/post\">Post</a></TableCell><TableCell>{post.status}</TableCell></TableRow>\n}\n}\n";
+        let expected = "page Posts() {\n  return ASX {\n    <TableRow>\n      <TableCell>\n        <a href=\"/post\">Post</a>\n      </TableCell>\n      <TableCell>{post.status}</TableCell>\n    </TableRow>\n  }\n}\n";
+        let formatted = format_ax_source(source);
+        assert_eq!(formatted, expected);
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert_eq!(
+            parse_ax_v2(source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+    }
+
+    #[test]
+    fn compact_markup_preserves_mixed_text_and_sensitive_content() {
+        for markup in [
+            "<Copy>Hello <strong>world</strong>!</Copy>",
+            "<pre><span> keep  spaces </span></pre>",
+            "<div>{\"<Card><Copy>fake</Copy></Card>\"}<Slot /></div>",
+            "<div><span>A</span> <span>B</span></div>",
+        ] {
+            assert!(expand_compact_markup(markup, "  ").is_none(), "{markup}");
+        }
+    }
+
+    #[test]
+    fn expands_fragments_and_ignores_angle_brackets_in_attributes() {
+        let markup = "<><Card title=\"a > b\"><Copy>{value}</Copy></Card><Slot /></>";
+        let lines = expand_compact_markup(markup, "  ").unwrap();
+        assert_eq!(
+            lines,
+            [
+                "<>",
+                "  <Card title=\"a > b\">",
+                "    <Copy>{value}</Copy>",
+                "  </Card>",
+                "  <Slot />",
+                "</>"
+            ]
+        );
+        let expression = "<Card when={count > 0}><Copy>Ready</Copy></Card>";
+        assert!(expand_compact_markup(expression, "  ").is_some());
+    }
+
+    #[test]
+    fn compact_markup_leaves_partial_or_invalid_lines_unchanged() {
+        for markup in [
+            "<Card><Copy>Hi</Copy>",
+            "<Card><Copy /></Wrong>",
+            "const x = \"<Card><Copy /></Card>\"",
+            "<Card><Copy /></Card> // comment",
+        ] {
+            assert!(expand_compact_markup(markup, "  ").is_none());
+        }
     }
 
     #[test]
