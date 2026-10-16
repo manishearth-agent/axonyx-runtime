@@ -19,6 +19,11 @@ pub fn format_ax_source(source: &str) -> String {
 
 pub fn format_ax_source_with_options(source: &str, options: AxFormatOptions) -> String {
     let normalized = source.replace("\r\n", "\n").replace('\r', "\n");
+    // Older declaration bodies use indentation as syntax, not just presentation.
+    // Leave those files untouched until they have a lossless legacy formatter.
+    if normalized.lines().any(is_indentation_sensitive_line) {
+        return normalized;
+    }
     let indent_unit = " ".repeat(options.indent_width);
     let mut formatted = Vec::new();
     let mut depth = 0usize;
@@ -107,6 +112,45 @@ fn is_raw_block_start(line: &str) -> bool {
     ["client JS", "client WASM", "style"].iter().any(|keyword| {
         line.strip_prefix(keyword)
             .is_some_and(|rest| rest.trim_start().starts_with('{'))
+    })
+}
+
+fn is_indentation_sensitive_line(line: &str) -> bool {
+    let text = line.trim_start();
+    if ["where", "order", "limit", "offset"].iter().any(|keyword| {
+        text.strip_prefix(keyword)
+            .is_some_and(|rest| rest.starts_with(char::is_whitespace))
+    }) {
+        return true;
+    }
+    if line.len() != line.trim_start().len() {
+        return false;
+    }
+    let header = line
+        .trim_end()
+        .strip_prefix("export ")
+        .unwrap_or(line.trim_end());
+    if header.contains('{') || header.ends_with('(') {
+        return false;
+    }
+    [
+        "backend",
+        "page",
+        "loader",
+        "route",
+        "action",
+        "job",
+        "query",
+        "fn",
+        "component",
+        "scope",
+    ]
+    .iter()
+    .any(|keyword| {
+        header == *keyword
+            || header
+                .strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with(char::is_whitespace))
     })
 }
 
@@ -525,6 +569,20 @@ mod tests {
         let formatted = format_ax_source(source);
         assert_eq!(formatted, expected);
         assert_eq!(format_ax_source(&formatted), expected);
+    }
+
+    #[test]
+    fn leaves_indentation_based_backend_and_legacy_headers_untouched() {
+        for source in [
+            "backend\n  env DATABASE_URL: Secret<String>\n  data themes: List<String> = [\"silver\"]\n",
+            "route GET \"/posts\"\n  data posts = db.posts.all()\n  return posts\n",
+            "job PublishDigest\n  data posts = db.posts.all()\n  send Digest with posts\n",
+            "page Home\n  Card title: \"Welcome\"\n    Copy -> \"Hello\"\n",
+            "import { posts } from \"./queries.ax\"\n\nexport loader Posts\n  return posts\n",
+            "query loadDocs() -> Doc[] {\n  data docs = Content.Collection(\"docs\")\n    where slug = input.slug\n    order title asc\n    limit 1\n    offset 0\n  return docs\n}\n",
+        ] {
+            assert_eq!(format_ax_source(source), source);
+        }
     }
 
     #[test]
