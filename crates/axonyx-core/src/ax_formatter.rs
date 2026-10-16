@@ -70,7 +70,16 @@ pub fn format_ax_source_with_options(source: &str, options: AxFormatOptions) -> 
             None
         };
         for part in expanded.as_deref().unwrap_or(&[line.to_string()]) {
-            formatted.push(format!("{}{}", indent_unit.repeat(line_depth), part));
+            let prefix = indent_unit.repeat(line_depth);
+            let wrapped =
+                if scanner.quote.is_none() && !scanner.pending_tag && !scanner.block_comment {
+                    wrap_long_open_tag(part, &indent_unit, prefix.len())
+                } else {
+                    None
+                };
+            for part in wrapped.as_deref().unwrap_or(&[part.to_string()]) {
+                formatted.push(format!("{prefix}{part}"));
+            }
         }
         previous_blank = false;
 
@@ -107,6 +116,83 @@ struct InlineMarkup<'a> {
     close: &'a str,
     children: Vec<InlineMarkup<'a>>,
     mixed: bool,
+}
+
+fn wrap_long_open_tag(line: &str, indent: &str, prefix_width: usize) -> Option<Vec<String>> {
+    let leading = line.len() - line.trim_start().len();
+    let source = &line[leading..];
+    if !source.starts_with('<') || source.starts_with("</") {
+        return None;
+    }
+    let end = inline_tag_end(source)?;
+    if prefix_width + leading + source[..end].chars().count() <= 100 {
+        return None;
+    }
+    let self_closing = source[..end].ends_with("/>");
+    let suffix = if self_closing { "/>" } else { ">" };
+    let attributes_end = end - suffix.len();
+    let name_end = source.find(char::is_whitespace)?;
+    if name_end >= attributes_end {
+        return None;
+    }
+    let mut attributes = Vec::new();
+    let mut cursor = name_end;
+    while cursor < attributes_end {
+        let ch = source[cursor..].chars().next()?;
+        if ch.is_whitespace() {
+            cursor += ch.len_utf8();
+            continue;
+        }
+        let start = cursor;
+        let mut quote = None;
+        let mut escaped = false;
+        while cursor < attributes_end {
+            let ch = source[cursor..].chars().next()?;
+            if let Some(active) = quote {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == active {
+                    quote = None;
+                }
+            } else if matches!(ch, '\'' | '"') {
+                quote = Some(ch);
+            } else if ch == '{' {
+                cursor += inline_expression_end(&source[cursor..])?;
+                continue;
+            } else if ch.is_whitespace() {
+                break;
+            }
+            cursor += ch.len_utf8();
+        }
+        let attribute = &source[start..cursor];
+        // Leave unusual/spaced assignment syntax alone rather than splitting it.
+        if !attribute.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+            || attribute.ends_with('=')
+        {
+            return None;
+        }
+        attributes.push(attribute);
+    }
+    if attributes.len() < 2 {
+        return None;
+    }
+    let padding = " ".repeat(leading);
+    let mut lines = vec![format!("{padding}{}", &source[..name_end])];
+    lines.extend(
+        attributes
+            .iter()
+            .map(|attribute| format!("{padding}{indent}{attribute}")),
+    );
+    lines.push(format!("{padding}{suffix}{}", &source[end..]));
+    // Validate the opening tag independently, including incomplete outer containers.
+    let original_probe = format!("{} />", source[..attributes_end].trim_end());
+    let formatted_probe = format!("{}\n{}\n/>", &source[..name_end], attributes.join("\n"));
+    let wrap = |tag: &str| format!("page FormatProbe() {{\nreturn ASX {{\n{tag}\n}}\n}}");
+    let before = crate::ax_parser_v2::parse_ax_v2(&wrap(&original_probe)).ok()?;
+    let after = crate::ax_parser_v2::parse_ax_v2(&wrap(&formatted_probe)).ok()?;
+    (before == after).then_some(lines)
 }
 
 // Only expand complete element-only containers. Leaf text and mixed prose keep
@@ -344,6 +430,14 @@ impl StructuralScanner {
             }
 
             if self.pending_tag {
+                if ch == '{' {
+                    if let Some(length) = inline_expression_end(&line[byte_index..]) {
+                        while index < chars.len() && chars[index].0 < byte_index + length {
+                            index += 1;
+                        }
+                        continue;
+                    }
+                }
                 if ch == '/' && next == Some('>') {
                     balance.closes += 1;
                     self.pending_tag = false;
@@ -406,36 +500,11 @@ enum TagEnd {
 }
 
 fn tag_end_kind(source: &str) -> TagEnd {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut previous = None;
-
-    for ch in source.chars() {
-        if let Some(active_quote) = quote {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == active_quote {
-                quote = None;
-            }
-            previous = Some(ch);
-            continue;
-        }
-
-        if matches!(ch, '"' | '\'' | '`') {
-            quote = Some(ch);
-        } else if ch == '>' {
-            return if previous == Some('/') {
-                TagEnd::SelfClosing
-            } else {
-                TagEnd::Open
-            };
-        }
-        previous = Some(ch);
+    match inline_tag_end(source) {
+        Some(end) if source[..end].ends_with("/>") => TagEnd::SelfClosing,
+        Some(_) => TagEnd::Open,
+        None => TagEnd::Pending,
     }
-
-    TagEnd::Pending
 }
 
 pub mod prelude {
@@ -469,6 +538,62 @@ mod tests {
             parse_ax_v2(source).unwrap(),
             parse_ax_v2(&formatted).unwrap()
         );
+    }
+
+    #[test]
+    fn wraps_long_attributes_and_preserves_expressions_and_ast() {
+        let source = "page Home() {\nreturn ASX {\n<Card description=\"A long description for a readable Foundry component with meaningful attributes\" when={count > 0}><Copy>Ready</Copy></Card>\n}\n}\n";
+        let formatted = format_ax_source(source);
+        assert!(formatted.contains("    <Card\n      description="));
+        assert!(formatted.contains("      when={count > 0}\n    >\n"));
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert_eq!(
+            parse_ax_v2(source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+    }
+
+    #[test]
+    fn wraps_self_closing_attributes_but_keeps_short_tags_compact() {
+        let long = "<Input label=\"A sufficiently long accessible input label for this formatting regression test\" value={\"a > b\"} />";
+        let lines = wrap_long_open_tag(long, "  ", 4).unwrap();
+        assert_eq!(lines.first().unwrap(), "<Input");
+        assert_eq!(lines.last().unwrap(), "/>");
+        assert_eq!(lines[2], "  value={\"a > b\"}");
+        assert!(wrap_long_open_tag("<Input label=\"Name\" value={name} />", "  ", 4).is_none());
+        let source = format!("page Home() {{\nreturn ASX {{\n{long}\n}}\n}}\n");
+        let formatted = format_ax_source(&source);
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert_eq!(
+            parse_ax_v2(&source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+    }
+
+    #[test]
+    fn self_closing_comparison_attribute_does_not_change_following_indentation() {
+        let source = "page Home() {\nreturn ASX {\n<Input label=\"A long accessible label that forces automatic wrapping in the shared Axonyx formatter\" value={count > 0} />\n}\n}\n";
+        let formatted = format_ax_source(source);
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert_eq!(
+            parse_ax_v2(source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+        assert!(formatted.ends_with("    />\n  }\n}\n"));
+    }
+
+    #[test]
+    fn attribute_wrapping_preserves_inline_prose_and_raw_code_strings() {
+        let tag = "<Copy title=\"This is a long title that should be wrapped while preserving the inline prose exactly as it was\" tone=\"lead\">Hello <strong>world</strong>!</Copy>";
+        let source = format!("page Home() {{\nreturn ASX {{\n{tag}\n}}\n}}\n");
+        let formatted = format_ax_source(&source);
+        assert!(formatted.contains(">Hello <strong>world</strong>!</Copy>"));
+        assert_eq!(
+            parse_ax_v2(&source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert!(wrap_long_open_tag(&format!("const sample = {tag:?}"), "  ", 0).is_none());
     }
 
     #[test]
