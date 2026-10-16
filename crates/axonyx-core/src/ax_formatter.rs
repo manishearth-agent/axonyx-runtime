@@ -500,6 +500,17 @@ impl StructuralScanner {
                 '}' | ']' | ')' => balance.closes += 1,
                 '<' => {
                     let tail = &line[byte_index..];
+                    // A complete inline subtree has zero structural balance.
+                    // Its prose may contain quotes, URLs or tags after text;
+                    // those are markup content, not code delimiters.
+                    if tag_can_start_at(line, byte_index) {
+                        if let Some((_, length)) = inline_markup(tail, 0) {
+                            while index < chars.len() && chars[index].0 < byte_index + length {
+                                index += 1;
+                            }
+                            continue;
+                        }
+                    }
                     if tail.starts_with("</") {
                         balance.closes += 1;
                     } else if tail.starts_with("<>") {
@@ -638,6 +649,37 @@ mod tests {
             parse_ax_v2(&formatted).unwrap()
         );
         assert!(formatted.ends_with("    />\n  }\n}\n"));
+    }
+
+    #[test]
+    fn mixed_inline_subtrees_do_not_shift_following_siblings() {
+        let source = "page Layout() {\nreturn ASX {\n<Container>\n<header><a href=\"/\"><img src=\"/logo.svg\" />Legura</a><label>Appearance<select><option>Light</option></select></label></header>\n<main><Slot /></main>\n</Container>\n}\n}\n";
+        let formatted = format_ax_source(source);
+        assert!(formatted
+            .contains("      <main>\n        <Slot />\n      </main>\n    </Container>\n  }\n}\n"));
+        assert_eq!(format_ax_source(&formatted), formatted);
+        assert_eq!(
+            parse_ax_v2(source).unwrap(),
+            parse_ax_v2(&formatted).unwrap()
+        );
+    }
+
+    #[test]
+    fn balanced_inline_prose_does_not_open_a_code_quote_or_comment() {
+        for text in [
+            "Don't change this",
+            "See https://example.test/path",
+            "Literal /* text */",
+        ] {
+            let source = format!("page Home() {{\nreturn ASX {{\n<Copy>{text}</Copy>\n<Card><Slot /></Card>\n}}\n}}\n");
+            let formatted = format_ax_source(&source);
+            assert!(formatted.contains("    <Card>\n      <Slot />\n    </Card>\n  }\n}\n"));
+            assert_eq!(format_ax_source(&formatted), formatted);
+            assert_eq!(
+                parse_ax_v2(&source).unwrap(),
+                parse_ax_v2(&formatted).unwrap()
+            );
+        }
     }
 
     #[test]
