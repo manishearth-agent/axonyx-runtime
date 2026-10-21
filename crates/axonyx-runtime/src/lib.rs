@@ -7,6 +7,8 @@ pub mod mutation_security;
 pub mod native;
 pub mod native_response;
 pub mod password;
+#[cfg(test)]
+mod public_native_response_tests;
 pub mod server;
 pub mod session;
 #[cfg(feature = "storage")]
@@ -2711,7 +2713,7 @@ fn render_preview_require_fallback(
     env: &backend::AxEnv,
 ) -> Result<AxPreviewHttpResponse, PreviewError> {
     let mut response = match fallback {
-        Some(AxReturnPlan::PrivateResponse { .. }) => {
+        Some(AxReturnPlan::PrivateResponse { .. } | AxReturnPlan::PublicResponse { .. }) => {
             return Err(PreviewError::Runtime {
                 message: "private Binary routes require the compiled server".into(),
             })
@@ -2875,7 +2877,7 @@ fn eval_preview_action_error_fallback_with_functions(
     }
 
     let value = match fallback {
-        Some(AxReturnPlan::PrivateResponse { .. }) => {
+        Some(AxReturnPlan::PrivateResponse { .. } | AxReturnPlan::PublicResponse { .. }) => {
             return Err(PreviewError::Runtime {
                 message: "private Binary routes require the compiled server".into(),
             })
@@ -3060,6 +3062,7 @@ fn eval_preview_return_with_functions(
         AxReturnPlan::Expr(expr) => eval_preview_expr_with_functions(expr, scope, env, functions),
         AxReturnPlan::Json(expr) => eval_preview_expr_with_functions(expr, scope, env, functions),
         AxReturnPlan::PrivateResponse { .. }
+        | AxReturnPlan::PublicResponse { .. }
         | AxReturnPlan::Redirect { .. }
         | AxReturnPlan::NoContent
         | AxReturnPlan::NotFound
@@ -3078,7 +3081,7 @@ fn render_preview_route_return(
     set_cookies: Vec<String>,
 ) -> Result<Option<AxPreviewHttpResponse>, PreviewError> {
     let response = match value {
-        AxReturnPlan::PrivateResponse { .. } => {
+        AxReturnPlan::PrivateResponse { .. } | AxReturnPlan::PublicResponse { .. } => {
             return Err(PreviewError::Runtime {
                 message: "private Binary routes require the compiled server".into(),
             })
